@@ -4,8 +4,9 @@ from netbox_agent.config import config
 import subprocess
 import logging
 import re
+import os
 
-REGEXP_CONTROLLER_HP = re.compile(r"Smart Array ([a-zA-Z0-9- ]+) in Slot ([0-9]+)")
+REGEXP_CONTROLLER_HP = re.compile(r"(Smart Array [a-zA-Z0-9- ]+) in Slot ([0-9]+)")
 
 
 class HPRaidControllerError(Exception):
@@ -50,11 +51,14 @@ def _parse_ctrl_output(lines):
         ctrl = REGEXP_CONTROLLER_HP.search(line)
         if ctrl is not None:
             slot = ctrl.group(2)
-            current_ctrl = "{} - Slot {}".format(ctrl.group(1), slot)
+            # current_ctrl = "{} - Slot {}".format(ctrl.group(1), slot)
+            current_ctrl = ctrl.group(1).strip()
             controllers[current_ctrl] = {"Slot": slot}
             if "Embedded" not in line:
                 controllers[current_ctrl]["External"] = True
-                continue
+            else:
+                controllers[current_ctrl]["External"] = False
+            continue
         if ": " not in line:
             continue
 

@@ -3,6 +3,7 @@ from netbox_agent.config import config
 from netbox_agent.config import netbox_instance as nb
 from netbox_agent.hypervisor import Hypervisor
 from netbox_agent.inventory import Inventory
+from netbox_agent.module_inventory import ModuleInventory
 from netbox_agent.location import Datacenter, Rack, Tenant
 from netbox_agent.misc import (
     create_netbox_tags,
@@ -52,7 +53,7 @@ class ServerBase:
 
     def get_netbox_tenant(self):
         tenant = self.get_tenant()
-        if tenant is None:
+        if tenant is None or tenant == "":
             return None
         nb_tenant = nb.tenancy.tenants.get(slug=self.get_tenant())
         return nb_tenant
@@ -63,7 +64,7 @@ class ServerBase:
 
     def get_netbox_datacenter(self):
         dc = self.get_datacenter()
-        if dc is None:
+        if dc is None or dc == "":
             logging.error("Specifying a datacenter (Site) is mandatory in Netbox")
             sys.exit(1)
 
@@ -418,6 +419,15 @@ class ServerBase:
                 server = self._netbox_create_server(datacenter, tenant, rack)
 
         logging.debug("Updating Server...")
+
+        # Add modules before network cards so that the module interfaces are created
+        update_module_inventory = config.module_inventory and (
+            config.register or config.update_all or config.update_module_inventory
+        )
+        self.module_inventory = ModuleInventory(server=self)
+        if update_module_inventory:
+            self.module_inventory.create_or_update()
+
         # check network cards
         if config.register or config.update_all or config.update_network:
             self.network = ServerNetwork(server=self)
@@ -426,8 +436,8 @@ class ServerBase:
             config.register or config.update_all or config.update_inventory
         )
         # update inventory if feature is enabled
-        self.inventory = Inventory(server=self)
         if update_inventory:
+            self.inventory = Inventory(server=self)
             self.inventory.create_or_update()
         # update psu
         if config.register or config.update_all or config.update_psu:

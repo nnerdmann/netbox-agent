@@ -65,6 +65,8 @@ class LSHW:
             return self.disks
         if hwclass == "memory":
             return self.memories
+        if hwclass == "power":
+            return self.power
 
     def find_network(self, obj):
         # Some interfaces do not have device (logical) name (eth0, for
@@ -96,6 +98,10 @@ class LSHW:
     def find_storage(self, obj):
         if "children" in obj:
             for device in obj["children"]:
+                logging.debug("%s", device)
+                if device.get("capabilities") and device["capabilities"] == "removable":
+                    # Skip removable disks
+                    continue
                 self.disks.append(
                     {
                         "logicalname": device.get("logicalname"),

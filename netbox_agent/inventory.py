@@ -48,7 +48,6 @@ class Inventory:
     """
 
     def __init__(self, server, update_expansion=False):
-        self.create_netbox_tags()
         self.server = server
         self.update_expansion = update_expansion
         netbox_server = self.server.get_netbox_server(update_expansion)
@@ -534,6 +533,7 @@ class Inventory:
     def create_or_update(self):
         if config.inventory is None or config.update_inventory is None:
             return False
+        self.create_netbox_tags()
         if self.update_expansion is False:
             self.do_netbox_cpus()
             self.do_netbox_memories()

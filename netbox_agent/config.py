@@ -16,7 +16,7 @@ def get_config():
         ],
         prog="netbox_agent",
         description="Netbox agent to run on your infrastructure's servers",
-        env_prefix="NETBOX_AGENT_",
+        env_prefix="NETBOX_AGENT",
         default_env=True,
     )
     p.add_argument("-c", "--config", action=jsonargparse.ActionConfigFile)
@@ -49,7 +49,7 @@ def get_config():
         help="Manage blade expansions as external devices",
     )
 
-    p.add_argument("--log_level", default="debug")
+    p.add_argument("--log_level", default="info")
     p.add_argument("--netbox.ssl_ca_certs_file", help="SSL CA certificates file")
     p.add_argument("--netbox.url", help="Netbox URL")
     p.add_argument("--netbox.token", help="Netbox API Token")
@@ -62,7 +62,7 @@ def get_config():
     p.add_argument(
         "--virtual.list_guests_cmd",
         default=None,
-        help="Command to output the list of vrtualization guests in the hypervisor separated by whitespace",
+        help="Command to output the list of virtualization guests in the hypervisor separated by whitespace",
     )
     p.add_argument(
         "--hostname_cmd",
@@ -118,8 +118,18 @@ def get_config():
         default=r"^(127\.0\.0\..*|fe80.*|::1.*)",
         help="Regex to ignore IPs",
     )
-    p.add_argument("--network.ipmi", default=True, help="Enable gathering IPMI information")
-    p.add_argument("--network.lldp", help="Enable auto-cabling feature through LLDP infos")
+    p.add_argument(
+        "--network.ipmi",
+        action=jsonargparse.ActionYesNo,
+        default=True,
+        help="Enable gathering IPMI information",
+    )
+    p.add_argument(
+        "--network.lldp",
+        action=jsonargparse.ActionYesNo,
+        default=False,
+        help="Enable auto-cabling feature through LLDP infos",
+    )
     p.add_argument(
         "--network.nic_id",
         choices=("name", "mac"),
@@ -136,6 +146,11 @@ def get_config():
         "--inventory",
         action="store_true",
         help="Enable HW inventory (CPU, Memory, RAID Cards, Disks) feature",
+    )
+    p.add_argument(
+        "--module-inventory",
+        action="store_true",
+        help="Enable module based HW inventory (CPU, Memory, RAID Cards, Disks) feature (EXPERIMENTAL)",
     )
     p.add_argument(
         "--process-virtual-drives",

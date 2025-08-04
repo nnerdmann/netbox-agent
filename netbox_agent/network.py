@@ -13,6 +13,7 @@ from netbox_agent.config import netbox_instance as nb
 from netbox_agent.ethtool import Ethtool
 from netbox_agent.ipmi import IPMI
 from netbox_agent.lldp import LLDP
+import glob
 
 VIRTUAL_NET_FOLDER = Path("/sys/devices/virtual/net")
 
@@ -46,8 +47,32 @@ class Network(object):
     def get_network_type():
         return NotImplementedError
 
+    def _parse_vlan_config(self):
+        vlan_interfaces = []
+        path = "/proc/net/vlan/config"
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            # Skip the first two lines (headers)
+            for line in lines[2:]:
+                parts = [p.strip() for p in line.strip().split("|")]
+                if len(parts) == 3:
+                    iface, vlan_id, phys_dev = parts
+                    vlan_interfaces.append(
+                        {"interface": iface, "vlan_id": int(vlan_id), "physical_device": phys_dev}
+                    )
+
+        except FileNotFoundError:
+            return vlan_interfaces
+        except (OSError, ValueError) as e:
+            logging.error("Error parsing VLAN config: %s", e)
+        return vlan_interfaces
+
     def scan(self):
         nics = []
+        vlan_interfaces = self._parse_vlan_config()
         for interface in os.listdir("/sys/class/net/"):
             # ignore if it's not a link (ie: bonding_masters etc)
             if not os.path.islink("/sys/class/net/{}".format(interface)):
@@ -104,9 +129,14 @@ class Network(object):
                 mac = mac.upper()
 
             mtu = int(open("/sys/class/net/{}/mtu".format(interface), "r").read().strip())
-            vlan = None
-            if len(interface.split(".")) > 1:
-                vlan = int(interface.split(".")[1])
+
+            vlan = []
+            parent_if = None
+            # Check if the interface is in the vlan_interfaces list
+            for vlan_info in vlan_interfaces:
+                if vlan_info["interface"] == interface:
+                    vlan = vlan_info["vlan_id"]
+                    parent_if = vlan_info["physical_device"]
 
             bonding = False
             bonding_slaves = []
@@ -116,7 +146,39 @@ class Network(object):
                     open("/sys/class/net/{}/bonding/slaves".format(interface)).read().split()
                 )
 
-            virtual = Path(f"/sys/class/net/{interface}").resolve().parent == VIRTUAL_NET_FOLDER
+            bridge = False
+            bridge_slaves = []
+            if os.path.isdir("/sys/class/net/{}/bridge".format(interface)):
+                bridge = True
+                # Bridge slaves are assigned by the lower interface
+
+            all_slaves = glob.glob("/sys/class/net/*/brport")
+            bridge_slaves = []
+            for brport_path in all_slaves:
+                try:
+                    # The parent directory is the slave interface
+                    slave_iface = Path(brport_path).parent.name
+                    # The brport symlink points to the bridge interface
+                    bridge_iface = Path(brport_path + "/bridge").resolve().name
+                    if bridge_iface == interface:
+                        if config.network.ignore_interfaces and re.match(
+                            config.network.ignore_interfaces, interface
+                        ):
+                            logging.debug(
+                                "Ignore bridge slave interface {interface}".format(
+                                    interface=interface
+                                )
+                            )
+                            continue
+                        bridge_slaves.append(slave_iface)
+                except Exception as e:
+                    logging.debug(f"Error processing bridge slave: {e}")
+
+            virtual = (
+                not bridge
+                and not bonding
+                and Path(f"/sys/class/net/{interface}").resolve().parent == VIRTUAL_NET_FOLDER
+            )
 
             nic = {
                 "name": interface,
@@ -128,10 +190,13 @@ class Network(object):
                 else None,  # FIXME: handle IPv6 addresses
                 "ethtool": ethtool,
                 "virtual": virtual,
+                "parent_if": parent_if,
                 "vlan": vlan,
                 "mtu": mtu,
                 "bonding": bonding,
                 "bonding_slaves": bonding_slaves,
+                "bridge": bridge,
+                "bridge_slave": bridge_slaves,
             }
             nics.append(nic)
         return nics
@@ -158,6 +223,34 @@ class Network(object):
             return False
         return True
 
+    def _set_bridge_interfaces(self):
+        bridge_nics = (x for x in self.nics if x["bridge"])
+        for nic in bridge_nics:
+            bridge_int = self.get_netbox_network_card(nic)
+            logging.debug(
+                "Setting bridge slave interfaces for {name}".format(name=bridge_int.name)
+            )
+            for slave_int in (
+                self.get_netbox_network_card(slave_nic)
+                for slave_nic in self.nics
+                if slave_nic["name"] in nic.get("bridge_slave", [])
+            ):
+                if (
+                    not hasattr(slave_int, "bridge")
+                    or slave_int.bridge is None
+                    or slave_int.bridge.id != bridge_int.id
+                ):
+                    logging.debug(
+                        "Setting interface {name} as bridge slave of {master}".format(
+                            name=slave_int.name, master=bridge_int.name
+                        )
+                    )
+                    slave_int.bridge = bridge_int
+                    slave_int.save()
+        else:
+            return False
+        return True
+
     def get_network_cards(self):
         return self.nics
 
@@ -172,11 +265,14 @@ class Network(object):
         return self.nb_net.interfaces.filter(**self.custom_arg_id)
 
     def get_netbox_type_for_nic(self, nic):
-        if self.get_network_type() == "virtual":
+        if self.get_network_type() == "virtualmachine":
             return self.dcim_choices["interface:type"]["Virtual"]
 
         if nic.get("bonding"):
             return self.dcim_choices["interface:type"]["Link Aggregation Group (LAG)"]
+
+        if nic.get("bridge"):
+            return self.dcim_choices["interface:type"]["Bridge"]
 
         if nic.get("virtual"):
             return self.dcim_choices["interface:type"]["Virtual"]
@@ -551,7 +647,17 @@ class Network(object):
                 if version.parse(nb.version) < version.parse("4.2"):
                     interface.mac_address = nic["mac"]
                 else:
-                    interface.primary_mac_address = {"mac_address": nic["mac"]}
+                    # Find the MAC address object and set its id as primary_mac_address
+                    mac_objs = list(
+                        self.nb_net.mac_addresses.filter(
+                            interface_id=interface.id, mac_address=nic["mac"]
+                        )
+                    )
+                    if mac_objs:
+                        interface.primary_mac_address = {"id": mac_objs[0].id}
+                    else:
+                        # Fallback: set MAC address directly if not found
+                        interface.primary_mac_address = {"mac_address": nic["mac"]}
                 nic_update += 1
 
             if hasattr(interface, "mtu"):
@@ -562,7 +668,7 @@ class Network(object):
                     interface.mtu = nic["mtu"]
                     nic_update += 1
 
-            if not isinstance(self, VirtualNetwork) and nic.get("ethtool"):
+            if not isinstance(self, VirtualMaschineNetwork) and nic.get("ethtool"):
                 if (
                     nic["ethtool"]["duplex"] != "-"
                     and interface.duplex != nic["ethtool"]["duplex"].lower()
@@ -612,6 +718,7 @@ class Network(object):
                 interface.save()
 
         self._set_bonding_interfaces()
+        self._set_bridge_interfaces()
         logging.debug("Finished updating NIC!")
 
 
@@ -742,9 +849,9 @@ class ServerNetwork(Network):
         return update, nb_server_interface
 
 
-class VirtualNetwork(Network):
+class VirtualMaschineNetwork(Network):
     def __init__(self, server, *args, **kwargs):
-        super(VirtualNetwork, self).__init__(server, args, kwargs)
+        super(VirtualMaschineNetwork, self).__init__(server, args, kwargs)
         self.server = server
         self.device = self.server.get_netbox_vm()
         self.nb_net = nb.virtualization
@@ -761,4 +868,4 @@ class VirtualNetwork(Network):
                 self.dcim_choices[key][choice["display_name"]] = choice["value"]
 
     def get_network_type(self):
-        return "virtual"
+        return "virtualmachine"

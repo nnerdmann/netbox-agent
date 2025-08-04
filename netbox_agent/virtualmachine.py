@@ -8,7 +8,7 @@ from netbox_agent.config import netbox_instance as nb
 from netbox_agent.location import Tenant
 from netbox_agent.logging import logging  # NOQA
 from netbox_agent.misc import create_netbox_tags, get_hostname, get_device_platform
-from netbox_agent.network import VirtualNetwork
+from netbox_agent.network import VirtualMaschineNetwork
 from pprint import pprint
 
 
@@ -114,7 +114,7 @@ class VirtualMachine(object):
             )
             created = True
 
-        self.network = VirtualNetwork(server=self)
+        self.network = VirtualMaschineNetwork(server=self)
         self.network.create_or_update_netbox_network_cards()
 
         if not created:
@@ -151,7 +151,7 @@ class VirtualMachine(object):
             vm.save()
 
     def print_debug(self):
-        self.network = VirtualNetwork(server=self)
+        self.network = VirtualMaschineNetwork(server=self)
         print("Cluster:", self.get_netbox_cluster(config.virtual.cluster_name))
         print("Platform:", self.device_platform)
         print("VM:", self.get_netbox_vm())

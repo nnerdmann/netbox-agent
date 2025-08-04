@@ -1,6 +1,8 @@
 import netbox_agent.dmidecode as dmidecode
 from netbox_agent.server import ServerBase
 from netbox_agent.inventory import Inventory
+import logging
+import re
 
 
 class HPHost(ServerBase):
@@ -121,3 +123,49 @@ class HPHost(ServerBase):
             if self.is_blade() and raid_card.is_external():
                 return True
         return False
+
+    def get_network_cards(self):
+        """
+        Get the list of NICs in the server.
+        """
+        nics = []
+        correlation_devices = dmidecode.get_by_type(self.dmi, 203)
+        for corr_device in correlation_devices:
+            if corr_device["Structured Name"].startswith("NIC"):
+                logging.debug("Correlate NIC %s", corr_device)
+                structured_name = corr_device["Structured Name"]
+                # HPE NICs are displayed differently in dmidecode types 203 depending if they are LOM or PCI.
+                # LOM NICs have an entry for each interface, while PCI NICs have a single entry with all interfaces.
+                # Therefore we hardcode the last integer to "1" to combine all interfaces into a single module bay.
+                # Example: "NIC.LOM.1.1" or "NIC.Slot.4.1" or "NIC.FlexLOM.1.2"
+                match = re.match(r"NIC\.([a-zA-Z0-9]+)\.(\d+)\.(\d+)", structured_name)
+                if match:
+                    module_bay = f"NIC.{match.group(1)}.{match.group(2)}.1"
+                    position = match.group(2)
+                else:
+                    module_bay = structured_name  # fallback to original if not matched
+                    position = ""  # default position if not matched
+
+                model = corr_device["Device Name"]
+                if model.endswith(" - NIC"):
+                    model = model[:-6]
+                if model.startswith("HPE "):
+                    model = model[4:]
+                nic = {
+                    "model": model,
+                    "location": corr_device["Device Location"],
+                    "module_bay": module_bay,
+                    "position": position,
+                }
+                # Append only if not already present in the list (same pci position)
+                if not any(
+                    nic["module_bay"] == existing_nic["module_bay"] for existing_nic in nics
+                ):
+                    # Check if the NIC is already in the list
+                    # This avoids duplicates based on PCI position
+                    # If you want to check by name or other attributes, adjust accordingly
+                    # Add the NIC to the list
+                    logging.debug("Detected HP specific NIC: %s", nic)
+                    nics.append(nic)
+
+        return nics
